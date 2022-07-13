@@ -3,18 +3,20 @@
 import os
 import glob
 import torch
-import utils
 import cv2
 import argparse
-
 from torchvision.transforms import Compose
+from tqdm import tqdm
+
+import sys
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+import midas_utils as utils
 from midas.dpt_depth import DPTDepthModel
 from midas.midas_net import MidasNet
 from midas.midas_net_custom import MidasNet_small
 from midas.transforms import Resize, NormalizeImage, PrepareForNet
 
-
-def run(input_path, output_path, model_path, model_type="large", optimize=True):
+def run_midas(input_path, output_path, model_path=None, model_type="midas_v21", optimize=True, skip_exists=False):
     """Run MonoDepthNN to compute depth maps.
 
     Args:
@@ -22,11 +24,17 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
         output_path (str): path to output folder
         model_path (str): path to saved model
     """
-    print("initialize")
+    # print("initialize")
 
     # select device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print("device: %s" % device)
+    # print("device: %s" % device)
+
+    # set default model path to be midas_v21
+    if model_path is None:
+        model_path = "weights/midas_v21-f6b98070.pt"
+        curpath = os.path.dirname(os.path.abspath(__file__))
+        model_path = os.path.join(curpath, model_path)
 
     # load network
     if model_type == "dpt_large": # DPT-Large
@@ -64,7 +72,7 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
     else:
         print(f"model_type '{model_type}' not implemented, use: --model_type large")
         assert False
-    
+
     transform = Compose(
         [
             Resize(
@@ -82,15 +90,15 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
     )
 
     model.eval()
-    
+
     if optimize==True:
         # rand_example = torch.rand(1, 3, net_h, net_w)
         # model(rand_example)
         # traced_script_module = torch.jit.trace(model, rand_example)
         # model = traced_script_module
-    
+
         if device == torch.device("cuda"):
-            model = model.to(memory_format=torch.channels_last)  
+            model = model.to(memory_format=torch.channels_last)
             model = model.half()
 
     model.to(device)
@@ -102,11 +110,16 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
     # create output folder
     os.makedirs(output_path, exist_ok=True)
 
-    print("start processing")
+    # print("start processing")
 
-    for ind, img_name in enumerate(img_names):
+    for ind, img_name in enumerate(tqdm(img_names)):
+        # print("  processing {} ({}/{})".format(img_name, ind + 1, num_images))
 
-        print("  processing {} ({}/{})".format(img_name, ind + 1, num_images))
+        filename = os.path.join(
+            output_path, os.path.splitext(os.path.basename(img_name))[0]
+        )
+        if skip_exists and os.path.exists(filename + ".pfm") and os.path.exists(filename + ".png"):
+            continue
 
         # input
 
@@ -117,7 +130,7 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
         with torch.no_grad():
             sample = torch.from_numpy(img_input).to(device).unsqueeze(0)
             if optimize==True and device == torch.device("cuda"):
-                sample = sample.to(memory_format=torch.channels_last)  
+                sample = sample.to(memory_format=torch.channels_last)
                 sample = sample.half()
             prediction = model.forward(sample)
             prediction = (
@@ -133,33 +146,30 @@ def run(input_path, output_path, model_path, model_type="large", optimize=True):
             )
 
         # output
-        filename = os.path.join(
-            output_path, os.path.splitext(os.path.basename(img_name))[0]
-        )
         utils.write_depth(filename, prediction, bits=2)
 
-    print("finished")
+    # print("finished")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
-    parser.add_argument('-i', '--input_path', 
+    parser.add_argument('-i', '--input_path',
         default='input',
         help='folder with input images'
     )
 
-    parser.add_argument('-o', '--output_path', 
+    parser.add_argument('-o', '--output_path',
         default='output',
         help='folder for output images'
     )
 
-    parser.add_argument('-m', '--model_weights', 
+    parser.add_argument('-m', '--model_weights',
         default=None,
         help='path to the trained weights of model'
     )
 
-    parser.add_argument('-t', '--model_type', 
+    parser.add_argument('-t', '--model_type',
         default='dpt_large',
         help='model type: dpt_large, dpt_hybrid, midas_v21_large or midas_v21_small'
     )
@@ -185,4 +195,4 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
 
     # compute depth maps
-    run(args.input_path, args.output_path, args.model_weights, args.model_type, args.optimize)
+    run_midas(args.input_path, args.output_path, args.model_weights, args.model_type, args.optimize)
